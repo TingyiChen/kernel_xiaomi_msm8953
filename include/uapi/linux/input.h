@@ -421,4 +421,9 @@ struct ff_effect {
 #define FF_MAX		0x7f
 #define FF_CNT		(FF_MAX+1)
 
+#define KEY_GESTURE_NAV_UP	195
+#define KEY_GESTURE_NAV_DOWN	196
+#define KEY_GESTURE_NAV_LEFT	197
+#define KEY_GESTURE_NAV_RIGHT	198
+
 #endif /* _UAPI_INPUT_H */
