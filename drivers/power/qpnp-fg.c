@@ -237,10 +237,10 @@ enum fg_mem_data_index {
 
 static struct fg_mem_setting settings[FG_MEM_SETTING_MAX] = {
 	/*       ID                    Address, Offset, Value*/
-	SETTING(SOFT_COLD,       0x454,   0,      100),
-	SETTING(SOFT_HOT,        0x454,   1,      400),
-	SETTING(HARD_COLD,       0x454,   2,      50),
-	SETTING(HARD_HOT,        0x454,   3,      450),
+	SETTING(SOFT_COLD,       0x454,   0,      150),
+	SETTING(SOFT_HOT,        0x454,   1,      450),
+	SETTING(HARD_COLD,       0x454,   2,      0),
+	SETTING(HARD_HOT,        0x454,   3,      550),
 	SETTING(RESUME_SOC,      0x45C,   1,      0),
 	SETTING(BCL_LM_THRESHOLD, 0x47C,   2,      50),
 	SETTING(BCL_MH_THRESHOLD, 0x47C,   3,      752),
@@ -248,7 +248,7 @@ static struct fg_mem_setting settings[FG_MEM_SETTING_MAX] = {
 	SETTING(CHG_TERM_CURRENT, 0x4F8,   2,      250),
 	SETTING(IRQ_VOLT_EMPTY,	 0x458,   3,      3100),
 	SETTING(CUTOFF_VOLTAGE,	 0x40C,   0,      3200),
-	SETTING(VBAT_EST_DIFF,	 0x000,   0,      30),
+	SETTING(VBAT_EST_DIFF,	 0x000,   0,      200),
 	SETTING(DELTA_SOC,	 0x450,   3,      1),
 	SETTING(BATT_LOW,	 0x458,   0,      4200),
 	SETTING(THERM_DELAY,	 0x4AC,   3,      0),
@@ -330,7 +330,7 @@ module_param_named(
 	battery_type, fg_batt_type, charp, S_IRUSR | S_IWUSR
 );
 
-static int fg_sram_update_period_ms = 30000;
+static int fg_sram_update_period_ms = 3000;
 module_param_named(
 	sram_update_period_ms, fg_sram_update_period_ms, int, S_IRUSR | S_IWUSR
 );
@@ -2026,10 +2026,7 @@ static void fg_handle_battery_insertion(struct fg_chip *chip)
 }
 
 
-static int soc_to_setpoint(int soc)
-{
-	return DIV_ROUND_CLOSEST(soc * 255, 100);
-}
+
 
 static void batt_to_setpoint_adc(int vbatt_mv, u8 *data)
 {
@@ -4035,8 +4032,8 @@ static void status_change_work(struct work_struct *work)
 
 	if (chip->status == POWER_SUPPLY_STATUS_FULL) {
 		if (capacity >= 99 && chip->hold_soc_while_full
-				&& chip->health == POWER_SUPPLY_HEALTH_GOOD) {
-			if (fg_debug_mask & FG_STATUS)
+				&& (chip->health == POWER_SUPPLY_HEALTH_GOOD || chip->health == POWER_SUPPLY_HEALTH_COOL)) {
+if (fg_debug_mask & FG_STATUS)
 				pr_info("holding soc at 100\n");
 			chip->charge_full = true;
 		} else if (fg_debug_mask & FG_STATUS) {
@@ -4449,7 +4446,7 @@ static bool fg_validate_battery_info(struct fg_chip *chip)
 	int i, delta_pct, batt_id_kohm, batt_temp, batt_volt_mv, batt_soc;
 
 	for (i = 1; i < BATT_INFO_MAX; i++) {
-		if (fg_debug_mask & FG_STATUS)
+
 			pr_info("batt_info[%d]: %d\n", i, chip->batt_info[i]);
 
 		if ((chip->batt_info[i] == 0 && i != BATT_INFO_TEMP) ||
@@ -4491,6 +4488,8 @@ static bool fg_validate_battery_info(struct fg_chip *chip)
 	if (batt_soc != 0 && batt_soc != FULL_SOC_RAW)
 		batt_soc = DIV_ROUND_CLOSEST((batt_soc - 1) *
 				(FULL_CAPACITY - 2), FULL_SOC_RAW - 2) + 1;
+	if (batt_soc == FULL_SOC_RAW)
+		chip->batt_info[BATT_INFO_SOC] = 100;
 
 	if (*chip->batt_range_ocv && chip->batt_max_voltage_uv > 1000)
 		delta_pct =  DIV_ROUND_CLOSEST(abs(batt_volt_mv -
@@ -6306,6 +6305,51 @@ fail:
 	return -EINVAL;
 }
 
+#ifdef CONFIG_MACH_XIAOMI_VINCE
+#define REDO_BATID_DURING_FIRST_EST BIT(4)
+static void fg_hw_restart(struct fg_chip *chip)
+{
+	u8 reg = 0;
+	int rc = 0, batt_id;
+	u8 data[4];
+
+	reg = 0x80;
+	batt_id = get_sram_prop_now(chip, FG_DATA_BATT_ID);
+	printk("fg_hw_restart old battery id = %d\n", batt_id);
+
+	fg_masked_write(chip, 0x4150, reg, reg, 1);
+
+	fg_masked_write(chip, chip->soc_base + SOC_RESTART, 0xFF, 0, 1);
+	mdelay(5);
+
+	reg = REDO_BATID_DURING_FIRST_EST|REDO_FIRST_ESTIMATE;
+
+	fg_masked_write(chip, chip->soc_base + SOC_RESTART, reg, reg, 1);
+	mdelay(5);
+
+	reg = REDO_BATID_DURING_FIRST_EST | REDO_FIRST_ESTIMATE | RESTART_GO;
+
+	fg_masked_write(chip, chip->soc_base + SOC_RESTART, reg, reg, 1);
+	mdelay(1000);
+
+	fg_masked_write(chip, chip->soc_base + SOC_RESTART, 0xFF, 0, 1);
+	fg_masked_write(chip, 0x4150, 0x80, 0, 1);
+
+	mdelay(2000);
+
+	rc = fg_mem_read(chip, data, fg_data[FG_DATA_BATT_ID].address, fg_data[FG_DATA_BATT_ID].len, fg_data[FG_DATA_BATT_ID].offset, 0);
+
+	if (rc) {
+		printk("Failed to get sram battery id data\n");
+	} else {
+		fg_data[FG_DATA_BATT_ID].value = data[0] * LSB_8B;
+	}
+
+	batt_id = get_sram_prop_now(chip, FG_DATA_BATT_ID);
+	printk("fg_hw_restart new batt_id=%d\n", batt_id);
+}
+#endif
+
 #define FG_PROFILE_LEN			128
 #define PROFILE_COMPARE_LEN		32
 #define THERMAL_COEFF_ADDR		0x444
@@ -6315,11 +6359,41 @@ static int fg_batt_profile_init(struct fg_chip *chip)
 {
 	int rc = 0, ret;
 	int len;
+
+#ifdef CONFIG_MACH_XIAOMI_VINCE
+	int i;
+	int batts_id_ohm[3] = {24000, 40000, 50000};
+	int delta = 0, limit = 0, batt_id = 0, match = 0, id_range_pct = 5;
+	bool in_range = false;
+#endif
+
 	struct device_node *node = chip->spmi->dev.of_node;
 	struct device_node *batt_node, *profile_node;
 	const char *data, *batt_type_str;
 	bool tried_again = false, vbat_in_range, profiles_same;
 	u8 reg = 0;
+
+#ifdef CONFIG_MACH_XIAOMI_VINCE
+	batt_id = get_sram_prop_now(chip, FG_DATA_BATT_ID);
+	printk("batt_id_ohm=%d\n", batt_id);
+	for (i = 0; i < 3; i++) {
+		delta = abs(batts_id_ohm[i] - batt_id);
+		printk("delta=%d\n", delta);
+		limit = (batts_id_ohm[i] * id_range_pct / 100);
+		printk("limit=%d\n", limit);
+		in_range = (delta <= limit);
+		printk("in_range=%d\n", in_range);
+		if (in_range != 0) {
+			match = 1;
+			printk("match=%d\n", match);
+		}
+	}
+	if (match == 0) {
+		fg_hw_restart(chip);
+		printk("re-read bat id\n");
+	}
+	printk("batt_id=%d\n", get_sram_prop_now(chip, FG_DATA_BATT_ID));
+#endif
 
 wait:
 	fg_stay_awake(&chip->profile_wakeup_source);
@@ -7092,7 +7166,11 @@ static int fg_of_init(struct fg_chip *chip)
 			"aging-eval-current-ma", rc,
 			DEFAULT_EVALUATION_CURRENT_MA);
 	OF_READ_PROPERTY(chip->cc_cv_threshold_mv,
+#ifdef CONFIG_MACH_XIAOMI_VINCE
+			"fg-cc-cv-threshold-mv-global", rc, 0);
+#else
 			"fg-cc-cv-threshold-mv", rc, 0);
+#endif
 	if (of_property_read_bool(chip->spmi->dev.of_node,
 				"qcom,capacity-learning-on"))
 		chip->batt_aging_mode = FG_AGING_CC;
@@ -8044,7 +8122,7 @@ static int fg_common_hw_init(struct fg_chip *chip)
 	}
 
 	rc = fg_mem_masked_write(chip, settings[FG_MEM_DELTA_SOC].address, 0xFF,
-			soc_to_setpoint(settings[FG_MEM_DELTA_SOC].value),
+			1,
 			settings[FG_MEM_DELTA_SOC].offset);
 	if (rc) {
 		pr_err("failed to write delta soc rc=%d\n", rc);
