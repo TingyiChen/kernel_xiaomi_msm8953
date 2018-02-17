@@ -33,6 +33,10 @@
 #include "mdss_debug.h"
 #include "mdss_dsi_phy.h"
 #include "mdss_dba_utils.h"
+#ifdef CONFIG_MACH_XIAOMI_VINCE
+#include <linux/string.h>
+#include "dsi_access.h"
+#endif
 
 #define XO_CLK_RATE	19200000
 #define CMDLINE_DSI_CTL_NUM_STRING_LEN 2
@@ -44,6 +48,252 @@ static struct mdss_dsi_data *mdss_dsi_res;
 #define DSI_ENABLE_PC_LATENCY PM_QOS_DEFAULT_VALUE
 
 static struct pm_qos_request mdss_dsi_pm_qos_request;
+
+int panel_suspend_reset_flag = 0;
+int panel_suspend_power_flag = 0;
+
+#ifdef CONFIG_MACH_XIAOMI_VINCE
+#ifdef DSI_ACCESS
+
+static ssize_t dsi_access_sysfs_read_show(struct device *dev,
+		struct device_attribute *attr, char *buf);
+
+static ssize_t dsi_access_sysfs_read_store(struct device *dev,
+		struct device_attribute *attr,
+		const char *buf, size_t count);
+
+static ssize_t dsi_access_sysfs_write_store(struct device *dev,
+		struct device_attribute *attr,
+		const char *buf, size_t count);
+
+static DEVICE_ATTR(read,(S_IRUGO | S_IWUSR | S_IWGRP),
+		dsi_access_sysfs_read_show, dsi_access_sysfs_read_store);
+
+static DEVICE_ATTR(write,(S_IWUSR | S_IWGRP),
+		NULL, dsi_access_sysfs_write_store);
+
+static struct attribute *dsi_access_attrs[] = {
+	&dev_attr_read.attr,
+	&dev_attr_write.attr,
+	NULL,
+};
+
+struct dsi_access dsi_access;
+
+static struct mdss_dsi_ctrl_pdata *g_ctrl_pdata;
+
+static void dsi_access_parse_input(const char *buf)
+{
+	int retval;
+	int index;
+	char *input;
+	char *token;
+	unsigned long value;
+
+	index = 0;
+	input = (char *)buf;
+
+	while (input != NULL && index < BUFFER_LENGTH) {
+		token = strsep(&input, " ");
+
+		retval = kstrtoul(token, 16, &value);
+		if (retval < 0) {
+			pr_err("%s: Failed to convert \"%s\" to hex number\n",
+					__func__, token);
+			continue;
+		}
+		dsi_access.cmd_buffer[index] = (unsigned char)value;
+		index++;
+	}
+
+	if (index > 1)
+		dsi_access.cmd_length = index;
+
+	return;
+}
+
+static int dsi_access_send_cmd(struct mdss_dsi_ctrl_pdata *ctrl,
+		struct dsi_panel_cmds *pcmds, enum read_write rw)
+{
+	int retval;
+	struct dcs_cmd_req cmdreq;
+
+	memset(&cmdreq, 0, sizeof(cmdreq));
+	cmdreq.cmds = pcmds->cmds;
+	cmdreq.cmds_cnt = pcmds->cmd_cnt;
+	cmdreq.flags = CMD_REQ_COMMIT | CMD_CLK_CTRL | CMD_REQ_HS_MODE;
+	cmdreq.rlen = 0;
+	cmdreq.cb = NULL;
+
+	if (rw == CMD_READ) {
+		cmdreq.flags |= CMD_REQ_RX;
+		cmdreq.rlen = dsi_access.read_length;
+		cmdreq.rbuf = dsi_access.read_buffer;
+	}
+
+	retval = mdss_dsi_cmdlist_put(ctrl, &cmdreq);
+
+	return retval;
+}
+
+static int dsi_access_do_read(void)
+{
+	int retval;
+	struct dsi_ctrl_hdr *dchdr;
+	struct mdss_dsi_ctrl_pdata *ctrl;
+
+	ctrl = g_ctrl_pdata;
+
+	if (dsi_access.desc_length < 9) {
+		kfree(dsi_access.desc_buffer);
+		dsi_access.desc_buffer = kzalloc(9, GFP_KERNEL);
+		dsi_access.desc_length = 9;
+	}
+
+	if (dsi_access.cmds.cmds == NULL) {
+		dsi_access.cmds.cmds = kzalloc(sizeof(struct dsi_cmd_desc),
+				GFP_KERNEL);
+	}
+
+	dsi_access.desc_buffer[0] = dsi_access.cmd_buffer[0];
+	dsi_access.desc_buffer[1] = 0x01;
+	dsi_access.desc_buffer[2] = 0x00;
+	dsi_access.desc_buffer[3] = 0x00;
+	dsi_access.desc_buffer[4] = 0x00;
+	dsi_access.desc_buffer[5] = 0x00;
+	dsi_access.desc_buffer[6] = 0x00;
+	dsi_access.desc_buffer[7] = dsi_access.cmd_buffer[1];
+	dsi_access.desc_buffer[8] = 0x00;
+
+	dchdr = (struct dsi_ctrl_hdr *)dsi_access.desc_buffer;
+	dchdr->dlen = 2;
+
+	dsi_access.cmds.cmds[0].dchdr = *dchdr;
+	dsi_access.cmds.cmds[0].payload = &dsi_access.desc_buffer[7];
+	dsi_access.cmds.cmd_cnt = 1;
+
+	retval = dsi_access_send_cmd(ctrl, &dsi_access.cmds, CMD_READ);
+	if (retval < 0)
+		return retval;
+
+	return retval;
+}
+
+static int dsi_access_do_write(void)
+{
+	int retval;
+	unsigned int desc_length;
+	struct dsi_ctrl_hdr *dchdr;
+	struct mdss_dsi_ctrl_pdata *ctrl;
+
+	ctrl = g_ctrl_pdata;
+
+	desc_length = sizeof(struct dsi_ctrl_hdr) + dsi_access.cmd_length - 1;
+	if (desc_length > dsi_access.desc_length) {
+		kfree(dsi_access.desc_buffer);
+		dsi_access.desc_buffer = kzalloc(desc_length, GFP_KERNEL);
+		dsi_access.desc_length = desc_length;
+	}
+
+	if (dsi_access.cmds.cmds == NULL) {
+		dsi_access.cmds.cmds = kzalloc(sizeof(struct dsi_cmd_desc),
+				GFP_KERNEL);
+	}
+
+	dsi_access.desc_buffer[0] = dsi_access.cmd_buffer[0];
+	dsi_access.desc_buffer[1] = 0x01;
+	dsi_access.desc_buffer[2] = 0x00;
+	dsi_access.desc_buffer[3] = 0x00;
+	dsi_access.desc_buffer[4] = 0x00;
+	dsi_access.desc_buffer[5] = 0x00;
+	dsi_access.desc_buffer[6] = 0x00;
+	memcpy(&dsi_access.desc_buffer[7], &dsi_access.cmd_buffer[1],
+			dsi_access.cmd_length - 1);
+
+	dchdr = (struct dsi_ctrl_hdr *)dsi_access.desc_buffer;
+	dchdr->dlen = dsi_access.cmd_length - 1;
+
+	dsi_access.cmds.cmds[0].dchdr = *dchdr;
+	dsi_access.cmds.cmds[0].payload = &dsi_access.desc_buffer[7];
+	dsi_access.cmds.cmd_cnt = 1;
+
+	retval = dsi_access_send_cmd(ctrl, &dsi_access.cmds, CMD_WRITE);
+
+	return retval;
+}
+
+static ssize_t dsi_access_sysfs_read_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	unsigned int idx;
+	unsigned int cnt;
+	unsigned int count;
+
+	count = 0;
+
+	for(idx = 0; idx < dsi_access.read_length - 1; idx++) {
+		cnt = snprintf(buf, PAGE_SIZE - count, "%02x ",
+				dsi_access.read_buffer[idx]);
+		buf += cnt;
+		count += cnt;
+	}
+
+	cnt = snprintf(buf, PAGE_SIZE - count, "%02x\n",
+			dsi_access.read_buffer[idx]);
+
+	count += cnt;
+
+	return count;
+}
+
+static ssize_t dsi_access_sysfs_read_store(struct device *dev,
+		struct device_attribute *attr,
+		const char *buf, size_t count)
+{
+	int retval = -EINVAL;
+
+	dsi_access_parse_input(buf);
+
+	if (dsi_access.cmd_length > 2)
+		dsi_access.read_length = dsi_access.cmd_buffer[2];
+	else
+		dsi_access.read_length = 1;
+
+	if (dsi_access.cmd_length > 1) /* data type + command */
+		retval = dsi_access_do_read();
+	else
+		pr_err("%s: No valid command to send\n", __func__);
+
+	dsi_access.cmd_length = 0;
+
+	if (retval < 0)
+		return retval;
+	else
+		return count;
+}
+
+static ssize_t dsi_access_sysfs_write_store(struct device *dev,
+		struct device_attribute *attr,
+		const char *buf, size_t count)
+{
+	int retval = -EINVAL;
+
+	dsi_access_parse_input(buf);
+
+	if (dsi_access.cmd_length > 1) /* data type + command */
+		retval = dsi_access_do_write();
+	else
+		pr_err("%s: No valid command to send\n", __func__);
+
+	dsi_access.cmd_length = 0;
+
+	if (retval < 0)
+		return retval;
+	else
+		return count;
+}
+#endif
+#endif
 
 static void mdss_dsi_pm_qos_add_request(struct mdss_dsi_ctrl_pdata *ctrl_pdata)
 {
@@ -271,6 +521,9 @@ static int mdss_dsi_regulator_init(struct platform_device *pdev,
 
 	return rc;
 }
+#ifdef CONFIG_MACH_XIAOMI_TIFFANY
+int acc_vreg = 0;
+#endif
 
 static int mdss_dsi_panel_power_off(struct mdss_panel_data *pdata)
 {
@@ -294,14 +547,42 @@ static int mdss_dsi_panel_power_off(struct mdss_panel_data *pdata)
 
 	if (mdss_dsi_pinctrl_set_state(ctrl_pdata, false))
 		pr_debug("reset disable: pinctrl not enabled\n");
+#ifdef CONFIG_MACH_XIAOMI_MSM8953
+#ifdef CONFIG_MACH_XIAOMI_TIFFANY
+	printk("D2 msm_dss_disable_vreg \n ");
 
+	if ((panel_suspend_power_flag != 3) && acc_vreg) {
+		ret = msm_dss_enable_vreg(
+		ctrl_pdata->panel_power_data.vreg_config,
+		ctrl_pdata->panel_power_data.num_vreg, 0);
+		acc_vreg--;
+		printk("set 5V low : panel_suspend_power_flag : %d acc_vreg : %d\n", panel_suspend_power_flag, acc_vreg);
+		if (ret)
+			pr_err("%s: failed to disable vregs for %s\n",
+			__func__, __mdss_dsi_pm_name(DSI_PANEL_PM));
+	}
+#else
+	printk("E7 msm_dss_disable_vreg \n ");
+
+	if ((!synaptics_gesture_func_on)
+		||(!synaptics_gesture_func_on_lansi)
+			||(!NVT_gesture_func_on)) {
+		ret = msm_dss_enable_vreg(
+				ctrl_pdata->panel_power_data.vreg_config,
+				ctrl_pdata->panel_power_data.num_vreg, 0);
+		if (ret)
+			pr_err("%s: failed to disable vregs for %s\n",
+				__func__, __mdss_dsi_pm_name(DSI_PANEL_PM));
+	}
+#endif
+#else
 	ret = msm_dss_enable_vreg(
 		ctrl_pdata->panel_power_data.vreg_config,
 		ctrl_pdata->panel_power_data.num_vreg, 0);
 	if (ret)
 		pr_err("%s: failed to disable vregs for %s\n",
 			__func__, __mdss_dsi_pm_name(DSI_PANEL_PM));
-
+#endif
 end:
 	return ret;
 }
@@ -318,7 +599,21 @@ static int mdss_dsi_panel_power_on(struct mdss_panel_data *pdata)
 
 	ctrl_pdata = container_of(pdata, struct mdss_dsi_ctrl_pdata,
 				panel_data);
-
+#ifdef CONFIG_XIAOMI_D2
+	printk("%s before acc_vreg : %d\n", __func__, acc_vreg);
+       if (!acc_vreg) {
+		ret = msm_dss_enable_vreg(
+		ctrl_pdata->panel_power_data.vreg_config,
+		ctrl_pdata->panel_power_data.num_vreg, 1);
+		acc_vreg++ ;
+		printk("%s acc_vreg : %d\n", __func__, acc_vreg);
+		if (ret) {
+			pr_err("%s: failed to enable vregs for %s\n",
+				__func__, __mdss_dsi_pm_name(DSI_PANEL_PM));
+			return ret;
+		}
+	}
+#else
 	ret = msm_dss_enable_vreg(
 		ctrl_pdata->panel_power_data.vreg_config,
 		ctrl_pdata->panel_power_data.num_vreg, 1);
@@ -327,6 +622,7 @@ static int mdss_dsi_panel_power_on(struct mdss_panel_data *pdata)
 			__func__, __mdss_dsi_pm_name(DSI_PANEL_PM));
 		return ret;
 	}
+#endif
 
 	/*
 	 * If continuous splash screen feature is enabled, then we need to
@@ -2824,12 +3120,23 @@ static struct device_node *mdss_dsi_pref_prim_panel(
  *
  * returns pointer to panel node on success, NULL on error.
  */
+
+static char panel_name[MDSS_MAX_PANEL_LEN] = "";
+#ifdef CONFIG_MACH_XIAOMI_VINCE
+int white_point_num = 0;
+#endif
+
 static struct device_node *mdss_dsi_find_panel_of_node(
 		struct platform_device *pdev, char *panel_cfg)
 {
 	int len, i = 0;
 	int ctrl_id = pdev->id - 1;
+#ifndef CONFIG_MACH_XIAOMI_MSM8953
 	char panel_name[MDSS_MAX_PANEL_LEN] = "";
+#endif
+#ifdef CONFIG_MACH_XIAOMI_VINCE
+	char *wponit_str;
+#endif
 	char ctrl_id_stream[3] =  "0:";
 	char *str1 = NULL, *str2 = NULL, *override_cfg = NULL;
 	char cfg_np_name[MDSS_MAX_PANEL_LEN] = "";
@@ -2845,6 +3152,16 @@ static struct device_node *mdss_dsi_find_panel_of_node(
 			 __func__, __LINE__);
 		goto end;
 	} else {
+#ifdef CONFIG_MACH_XIAOMI_VINCE
+		wponit_str = strnstr(panel_cfg, ":wpoint=", len);
+		if (!wponit_str) {
+			pr_err("%s:[white point calibration] white point is not present in %s\n",
+					__func__, panel_cfg);
+		} else{
+			white_point_num = ((*(wponit_str +  8)) - '0') * 10 +((*(wponit_str +  9) - '0'));
+			pr_err("[white point calibration] white_point_num = %d\n", white_point_num);
+		}
+#endif
 		/* check if any override parameters are set */
 		pinfo->sim_panel_mode = 0;
 		override_cfg = strnstr(panel_cfg, "#" OVERRIDE_CFG, len);
@@ -2892,6 +3209,17 @@ static struct device_node *mdss_dsi_find_panel_of_node(
 			__func__, panel_cfg, panel_name);
 		if (!strcmp(panel_name, NONE_PANEL))
 			goto exit;
+
+		if (!strcmp(panel_name, "qcom,mdss_dsi_td4310_fhd_video")) {
+			panel_suspend_reset_flag = 1;
+			panel_suspend_power_flag = 1;
+		} else if (!strcmp(panel_name, "qcom,mdss_dsi_otm1911_fhd_video")) {
+			panel_suspend_reset_flag = 2;
+			panel_suspend_power_flag = 2;
+		} else if (!strcmp(panel_name, "qcom,mdss_dsi_ft8716_fhd_video")) {
+			panel_suspend_reset_flag = 3;
+			panel_suspend_power_flag = 3;
+		}
 
 		mdss_node = of_parse_phandle(pdev->dev.of_node,
 			"qcom,mdss-mdp", 0);
@@ -3166,6 +3494,7 @@ static int mdss_dsi_get_bridge_chip_params(struct mdss_panel_info *pinfo,
 end:
 	return rc;
 }
+struct mdss_panel_data *panel_data;
 
 static int mdss_dsi_ctrl_probe(struct platform_device *pdev)
 {
@@ -3259,6 +3588,7 @@ static int mdss_dsi_ctrl_probe(struct platform_device *pdev)
 	} else {
 		ctrl_pdata->bklt_ctrl = UNKNOWN_CTRL;
 	}
+	panel_data = &ctrl_pdata->panel_data;
 
 	rc = dsi_panel_device_register(pdev, dsi_pan_node, ctrl_pdata);
 	if (rc) {
@@ -4064,6 +4394,48 @@ static int mdss_dsi_parse_ctrl_params(struct platform_device *ctrl_pdev,
 
 }
 
+u32 te_count;
+static irqreturn_t te_interrupt(int irq, void *data)
+{
+	disable_irq_nosync(irq);
+
+	te_count++;
+
+	enable_irq(irq);
+	return IRQ_HANDLED;
+}
+
+int init_te_irq(struct mdss_dsi_ctrl_pdata *ctrl_pdata)
+{
+	int rc = -1;
+	int irq;
+	if (gpio_is_valid(ctrl_pdata->disp_te_gpio)) {
+		rc = gpio_request(ctrl_pdata->disp_te_gpio, "te-gpio");
+		if (rc < 0) {
+			pr_err("%s: gpio_request fail rc=%d\n", __func__, rc);
+			return rc ;
+		}
+		rc = gpio_direction_input(ctrl_pdata->disp_te_gpio);
+		if (rc < 0) {
+			pr_err("%s: gpio_direction_input fail rc=%d\n", __func__, rc);
+			return rc ;
+		}
+		irq = gpio_to_irq(ctrl_pdata->disp_te_gpio);
+		pr_err("%s:liujia  irq = %d\n", __func__, irq);
+			rc = request_threaded_irq(irq, te_interrupt, NULL,
+				 IRQF_TRIGGER_RISING|IRQF_ONESHOT,
+				"te-irq", ctrl_pdata);
+		if (rc < 0) {
+			pr_err("%s: request_irq fail rc=%d\n", __func__, rc);
+			return rc ;
+		}
+	} else{
+		pr_err("%s:liujia irq gpio not provided\n", __func__);
+		return rc ;
+	}
+	return 0;
+}
+
 static int mdss_dsi_parse_gpio_params(struct platform_device *ctrl_pdev,
 	struct mdss_dsi_ctrl_pdata *ctrl_pdata)
 {
@@ -4228,6 +4600,10 @@ int dsi_panel_device_register(struct platform_device *ctrl_pdev,
 		ctrl_pdata->check_status = mdss_dsi_reg_status_check;
 	else if (ctrl_pdata->status_mode == ESD_BTA)
 		ctrl_pdata->check_status = mdss_dsi_bta_status_check;
+	else if (ctrl_pdata->status_mode == ESD_TE_NT35596) {
+		ctrl_pdata->check_status = mdss_dsi_TE_NT35596_check;
+	        init_te_irq(ctrl_pdata);
+	}
 
 	if (ctrl_pdata->status_mode == ESD_MAX) {
 		pr_err("%s: Using default BTA for ESD check\n", __func__);
@@ -4307,6 +4683,17 @@ int dsi_panel_device_register(struct platform_device *ctrl_pdev,
 
 	panel_debug_register_base("panel",
 		ctrl_pdata->ctrl_base, ctrl_pdata->reg_size);
+
+#ifdef CONFIG_MACH_XIAOMI_VINCE
+#ifdef DSI_ACCESS
+	if (pinfo->pdest == DISPLAY_1) {
+		dsi_access.attr_group.attrs = dsi_access_attrs;
+		g_ctrl_pdata = ctrl_pdata;
+	} else {
+		g_ctrl_pdata = ctrl_pdata;
+	}
+#endif
+#endif
 
 	pr_debug("%s: Panel data initialized\n", __func__);
 	return 0;
