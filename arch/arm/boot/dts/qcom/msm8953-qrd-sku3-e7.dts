@@ -9056,6 +9056,7 @@
 					qcom,wave-samples = <0x3e3e3e3e 0x3e3e3e3e>;
 					qcom,wave-rep-cnt = <0x1>;
 					qcom,wave-samp-rep-cnt = <0x1>;
+					qcom,pmic-revid = <0x123>;
 				};
 			};
 		};
