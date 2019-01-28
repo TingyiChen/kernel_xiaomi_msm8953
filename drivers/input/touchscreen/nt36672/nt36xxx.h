@@ -1,10 +1,9 @@
 /*
  * Copyright (C) 2010 - 2017 Novatek, Inc.
+ * Copyright (C) 2019 XiaoMi, Inc.
  *
  * $Revision: 15234 $
  * $Date: 2017-08-09 11:34:54 +0800 (週三, 09 八月 2017) $
- *
- * Copyright (C) 2018 XiaoMi, Inc.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -22,6 +21,7 @@
 
 #include <linux/i2c.h>
 #include <linux/input.h>
+#include <linux/uaccess.h>
 
 #ifdef CONFIG_HAS_EARLYSUSPEND
 #include <linux/earlysuspend.h>
@@ -57,6 +57,8 @@
 
 
 
+#define TOUCH_DEFAULT_MAX_WIDTH 1080
+#define TOUCH_DEFAULT_MAX_HEIGHT 2160
 #define TOUCH_MAX_FINGER_NUM 10
 #define TOUCH_KEY_NUM 0
 #if TOUCH_KEY_NUM > 0
@@ -76,6 +78,10 @@ extern bool NVT_gesture_func_on;
 #endif
 #define BOOT_UPDATE_FIRMWARE 1
 #define BOOT_UPDATE_FIRMWARE_NAME "novatek_ts_fw.bin"
+
+
+#define NVT_TOUCH_ESD_PROTECT 1
+#define NVT_TOUCH_ESD_CHECK_PERIOD 1500	/* ms */
 
 struct nvt_ts_mem_map {
 	uint32_t EVENT_BUF_ADDR;
@@ -126,6 +132,10 @@ struct nvt_ts_data {
 	int32_t irq_gpio;
 	uint32_t irq_flags;
 	int32_t reset_gpio;
+	/*Modifiy by HQ-zmc [Date: 2018-04-23 21:14:58]*/
+	const char *pwr_reg_name;
+	struct regulator *pwr_reg;
+
 	uint32_t reset_flags;
 	struct mutex lock;
 	const struct nvt_ts_mem_map *mmap;
@@ -148,11 +158,11 @@ typedef enum {
 } RST_COMPLETE_STATE;
 
 typedef enum {
-	EVENT_MAP_HOST_CMD                      = 0x50,
-	EVENT_MAP_HANDSHAKING_or_SUB_CMD_BYTE   = 0x51,
-	EVENT_MAP_RESET_COMPLETE                = 0x60,
-	EVENT_MAP_FWINFO                        = 0x78,
-	EVENT_MAP_PROJECTID                     = 0x9A,
+    EVENT_MAP_HOST_CMD                      = 0x50,
+    EVENT_MAP_HANDSHAKING_or_SUB_CMD_BYTE   = 0x51,
+    EVENT_MAP_RESET_COMPLETE                = 0x60,
+    EVENT_MAP_FWINFO                        = 0x78,
+    EVENT_MAP_PROJECTID                     = 0x9A,
 } I2C_EVENT_MAP;
 
 
@@ -167,5 +177,8 @@ extern int32_t nvt_check_fw_reset_state(RST_COMPLETE_STATE check_reset_state);
 extern int32_t nvt_get_fw_info(void);
 extern int32_t nvt_clear_fw_status(void);
 extern int32_t nvt_check_fw_status(void);
+#if NVT_TOUCH_ESD_PROTECT
+extern void nvt_esd_check_enable(uint8_t enable);
+#endif
 
 #endif /* _LINUX_NVT_TOUCH_H */
