@@ -14,8 +14,9 @@
 
 #define MAX98927L 0
 #define MAX98927R 1
-
-typedef enum {
+#define MAX_CHANNEL_NUM (2)
+typedef enum
+{
 
 	MAX98927_Interrupt_Raw_1                                          = 0x0001,
 	MAX98927_Interrupt_Raw_1_BDE_ACTIVE_END_RAW                       = (0x1 << 0),
@@ -1165,14 +1166,18 @@ typedef enum {
 
 } MAX98927Registers;
 
+typedef enum{
+	MAX98927_CH0		= (1 << 0),
+	MAX98927_CH1		= (1 << 1),
+	MAX98927_CH2		= (1 << 2),
+	MAX98927_CH3		= (1 << 3),
+} MAX98927_CHANNEL_SHIT;
+
 struct max98927_priv {
 	struct device *dev;
-	struct regmap *regmap_l;
-	struct regmap *regmap_r;
-	struct regmap *regmap;
+	struct regmap *regmap[MAX_CHANNEL_NUM];
 	struct snd_soc_codec *codec;
 	struct max98927_pdata *pdata;
-
 	unsigned int spk_mode;
 	unsigned int spk_gain;
 	unsigned int sysclk;
@@ -1180,9 +1185,8 @@ struct max98927_priv {
 	unsigned int i_l_slot;
 	unsigned int v_r_slot;
 	unsigned int i_r_slot;
-	bool mono_stereo;
-	bool left_i2c;
-	bool right_i2c;
+	unsigned int mono_stereo;
+	unsigned int i2c_states;
 	bool interleave_mode;
 	unsigned int ch_size;
 	unsigned int rate;
@@ -1213,8 +1217,15 @@ struct max98927_priv {
 	unsigned int digital_gain;
 	unsigned int pdm_gain;
 	unsigned int level_hold;
+    unsigned int ref_RDC[2];
+    unsigned int path_status;
+    unsigned int adsp_mode;
 	int reset_gpio_l;
 	int reset_gpio_r;
+#ifdef CONFIG_DEBUG_FS
+    struct dentry *dbg_dir;
+#endif
+    struct regulator *max989xx_vdd;
 };
 
 #define MAX98927_GLOBAL_SHIFT 0

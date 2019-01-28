@@ -350,11 +350,9 @@ void tas2557_enableIRQ(struct tas2557_priv *pTAS2557, bool enable)
 			}
 		}
 	} else {
-		if (pTAS2557->mbIRQEnable) {
-			if (gpio_is_valid(pTAS2557->mnGpioINT))
-				disable_irq_nosync(pTAS2557->mnIRQ);
-			pTAS2557->mbIRQEnable = false;
-		}
+		if (gpio_is_valid(pTAS2557->mnGpioINT))
+		disable_irq_nosync(pTAS2557->mnIRQ);
+		pTAS2557->mbIRQEnable = false;
 	}
 }
 

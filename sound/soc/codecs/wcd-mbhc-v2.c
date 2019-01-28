@@ -41,7 +41,7 @@
 				  SND_JACK_BTN_4 | SND_JACK_BTN_5 | \
 				  SND_JACK_BTN_6 | SND_JACK_BTN_7)
 #define OCP_ATTEMPT 1
-#define HS_DETECT_PLUG_TIME_MS (2500)
+#define HS_DETECT_PLUG_TIME_MS (3 * 1000)
 #define SPECIAL_HS_DETECT_TIME_MS (2 * 1000)
 #define MBHC_BUTTON_PRESS_THRESHOLD_MIN 750
 #define GND_MIC_SWAP_THRESHOLD 4
@@ -51,8 +51,9 @@
 #define FW_READ_TIMEOUT 4000000
 #define FAKE_REM_RETRY_ATTEMPTS 3
 #define MAX_IMPED 60000
+#define CAM_HS_IMPED 45000
 
-#define WCD_MBHC_BTN_PRESS_COMPL_TIMEOUT_MS  50
+#define WCD_MBHC_BTN_PRESS_COMPL_TIMEOUT_MS  200
 #define ANC_DETECT_RETRY_CNT 7
 #define WCD_MBHC_SPL_HS_CNT  2
 
@@ -639,6 +640,7 @@ static void wcd_mbhc_report_plug(struct wcd_mbhc *mbhc, int insertion,
 		mbhc->current_plug = MBHC_PLUG_TYPE_NONE;
 #ifdef CONFIG_MACH_XIAOMI_TIFFANY
 		pr_debug("%s [zoro] lsn ext_pa_gpio= %d\n", __func__, ext_pa_gpio);
+		msleep(1000);
 		gpio_set_value(ext_pa_gpio, EXT_PA_PULL_DOWN);
 #endif
 	} else {
@@ -714,7 +716,11 @@ static void wcd_mbhc_report_plug(struct wcd_mbhc *mbhc, int insertion,
 			mbhc->current_plug = MBHC_PLUG_TYPE_HIGH_HPH;
 		} else if (jack_type == SND_JACK_ANC_HEADPHONE)
 			mbhc->current_plug = MBHC_PLUG_TYPE_ANC_HEADPHONE;
-#ifdef CONFIG_MACH_XIAOMI_TIFFANY
+
+		if(jack_type == SND_JACK_UNSUPPORTED){
+			printk("%s:jack_type is 0x100, off pa to compute imp\n",__func__);
+			wcd_mbhc_set_and_turnoff_hph_padac(mbhc);
+		}
 
 		if (mbhc->mbhc_cb->hph_pa_on_status)
 			is_pa_on = mbhc->mbhc_cb->hph_pa_on_status(codec);
@@ -723,18 +729,13 @@ static void wcd_mbhc_report_plug(struct wcd_mbhc *mbhc, int insertion,
 			mbhc->mbhc_cb->compute_impedance &&
 			(mbhc->mbhc_cfg->linein_th != 0) &&
 			(!is_pa_on)) {
-#else
-		if (mbhc->impedance_detect &&
-			mbhc->mbhc_cb->compute_impedance &&
-			(mbhc->mbhc_cfg->linein_th != 0)) {
-#endif
 				mbhc->mbhc_cb->compute_impedance(mbhc,
 						&mbhc->zl, &mbhc->zr);
 			if ((mbhc->zl > mbhc->mbhc_cfg->linein_th &&
 				mbhc->zl < MAX_IMPED) &&
 				(mbhc->zr > mbhc->mbhc_cfg->linein_th &&
 				 mbhc->zr < MAX_IMPED) &&
-				(jack_type == SND_JACK_HEADPHONE)) {
+				(jack_type == SND_JACK_HEADPHONE) && (mbhc->mbhc_cfg->detect_extn_cable)) {
 				jack_type = SND_JACK_LINEOUT;
 				mbhc->current_plug = MBHC_PLUG_TYPE_HIGH_HPH;
 				if (mbhc->hph_status) {
@@ -749,6 +750,27 @@ static void wcd_mbhc_report_plug(struct wcd_mbhc *mbhc, int insertion,
 				pr_debug("%s: Marking jack type as SND_JACK_LINEOUT\n",
 				__func__);
 			}
+
+			if ((mbhc->zl > CAM_HS_IMPED &&
+				mbhc->zl < MAX_IMPED) &&
+				(mbhc->zr > CAM_HS_IMPED &&
+				mbhc->zr < MAX_IMPED) &&
+				(jack_type == SND_JACK_UNSUPPORTED)) {
+					jack_type = SND_JACK_HEADSET;
+					mbhc->current_plug = MBHC_PLUG_TYPE_HEADSET;
+					mbhc->jiffies_atreport = jiffies;
+					if (mbhc->hph_status) {
+						mbhc->hph_status &= ~(SND_JACK_HEADSET |
+							    SND_JACK_LINEOUT |
+							    SND_JACK_UNSUPPORTED);
+						wcd_mbhc_jack_report(mbhc,
+							    &mbhc->headset_jack,
+							    mbhc->hph_status,
+							    WCD_MBHC_JACK_MASK);
+					}
+			}
+			printk("%s: [%d,%d] jack type changed by IMPED\n",
+			__func__,mbhc->zl,mbhc->zr);
 		}
 
 		mbhc->hph_status |= jack_type;
@@ -1504,7 +1526,7 @@ exit:
 		WCD_MBHC_RSC_UNLOCK(mbhc);
 	}
 	if (mbhc->mbhc_cb->set_cap_mode)
-		mbhc->mbhc_cb->set_cap_mode(codec, micbias1, micbias2);
+		mbhc->mbhc_cb->set_cap_mode(codec, micbias1, is_jack_insert);
 
 	if (mbhc->mbhc_cb->hph_pull_down_ctrl)
 		mbhc->mbhc_cb->hph_pull_down_ctrl(codec, true);
@@ -2462,11 +2484,7 @@ int wcd_mbhc_init(struct wcd_mbhc *mbhc, struct snd_soc_codec *codec,
 	mbhc->is_btn_press = false;
 	mbhc->codec = codec;
 	mbhc->intr_ids = mbhc_cdc_intr_ids;
-#if defined (CONFIG_MACH_XIAOMI_TIFFANY) || defined (CONFIG_MACH_XIAOMI_VINCE)
-	mbhc->impedance_detect = false;
-#else
-	mbhc->impedance_detect = impedance_det_en;
-#endif
+	mbhc->impedance_detect = true;
 	mbhc->hphl_swh = hph_swh;
 	mbhc->gnd_swh = gnd_swh;
 	mbhc->micbias_enable = false;

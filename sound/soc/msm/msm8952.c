@@ -58,7 +58,6 @@ int ext_pa_status = 0;
 #define MAX_WSA_CODEC_NAME_LENGTH 80
 #define MSM_DT_MAX_PROP_SIZE 80
 
-#define EXT_PA_MODE  5
 enum btsco_rates {
 	RATE_8KHZ_ID,
 	RATE_16KHZ_ID,
@@ -265,7 +264,9 @@ int is_ext_spk_gpio_support(struct platform_device *pdev,
 			return -EINVAL;
 		}
 	}
+#ifdef CONFIG_MACH_XIAOMI_TIFFANY
 	gpio_direction_output(pdata->spk_ext_pa_gpio, 0);
+#endif
 	return 0;
 }
 
@@ -300,7 +301,7 @@ static int enable_spk_ext_pa(struct snd_soc_codec *codec, int enable)
 {
 	struct snd_soc_card *card = codec->component.card;
 	struct msm8916_asoc_mach_data *pdata = snd_soc_card_get_drvdata(card);
-	int pa_mode = EXT_PA_MODE;
+	int ret;
 
 	if (!gpio_is_valid(pdata->spk_ext_pa_gpio)) {
 		pr_err("%s: Invalid gpio: %d\n", __func__,
@@ -312,15 +313,21 @@ static int enable_spk_ext_pa(struct snd_soc_codec *codec, int enable)
 		enable ? "Enable" : "Disable");
 
 	if (enable) {
-		while (pa_mode > 0) {
-			gpio_set_value_cansleep(pdata->spk_ext_pa_gpio, 0);
-			udelay(2);
-			gpio_set_value_cansleep(pdata->spk_ext_pa_gpio, enable);
-			udelay(2);
-			pa_mode--;
+		ret = msm_gpioset_activate(CLIENT_WCD_INT, "ext_spk_gpio");
+		if (ret) {
+			pr_err("%s: gpio set cannot be de-activated %s\n",
+					__func__, "ext_spk_gpio");
+			return ret;
 		}
+		gpio_set_value_cansleep(pdata->spk_ext_pa_gpio, enable);
 	} else {
 		gpio_set_value_cansleep(pdata->spk_ext_pa_gpio, enable);
+		ret = msm_gpioset_suspend(CLIENT_WCD_INT, "ext_spk_gpio");
+		if (ret) {
+			pr_err("%s: gpio set cannot be de-activated %s\n",
+					__func__, "ext_spk_gpio");
+			return ret;
+		}
 	}
 	return 0;
 }
@@ -2430,8 +2437,8 @@ static struct snd_soc_dai_link msm8952_dai[] = {
 		.ignore_pmdown_time = 1,
 		.be_id = MSM_FRONTEND_DAI_MULTIMEDIA29,
 	},
-#ifdef CONFIG_SND_SOC_MAX98927
-	{/* hw:x,38 */
+#if (defined CONFIG_SND_SOC_MAX98927) || (defined CONFIG_SND_SOC_TAS2557)
+	{/* hw:x,43 */
 		.name = "Quinary MI2S TX_Hostless",
 		.stream_name = "Quinary MI2S_TX Hostless Capture",
 		.cpu_dai_name = "QUIN_MI2S_TX_HOSTLESS",
@@ -2446,7 +2453,7 @@ static struct snd_soc_dai_link msm8952_dai[] = {
 		.codec_dai_name = "snd-soc-dummy-dai",
 		.codec_name = "snd-soc-dummy",
 	},
-	{ /* hw:x,39 */
+	{ /* hw:x,44 */
 		.name = "Quinary MI2S_RX Hostless",
 		.stream_name = "Quinary MI2S_RX Hostless",
 		.cpu_dai_name = "QUIN_MI2S_RX_HOSTLESS",
@@ -2462,40 +2469,6 @@ static struct snd_soc_dai_link msm8952_dai[] = {
 		/* This dainlink has MI2S support */
 		.codec_dai_name = "snd-soc-dummy-dai",
 		.codec_name = "snd-soc-dummy",
-	},
-#endif
-#if defined (CONFIG_TAS2557_CODEC)
-	{/* hw:x,38 */
-		.name = "Quinary MI2S TX_Hostless",
-		.stream_name = "Quinary MI2S_TX Hostless Capture",
-		.cpu_dai_name = "QUIN_MI2S_TX_HOSTLESS",
-		.platform_name = "msm-pcm-hostless",
-		.dynamic = 1,
-		.dpcm_capture = 1,
-		.trigger = {SND_SOC_DPCM_TRIGGER_POST,
-			SND_SOC_DPCM_TRIGGER_POST},
-		.no_host_mode = SND_SOC_DAI_LINK_NO_HOST,
-		.ignore_suspend = 1,
-		.ignore_pmdown_time = 1,
-		.codec_dai_name = "tas2557 ASI1",
-		.codec_name = "tas2557.2-004c",
-	},
-	{ /* hw:x,39 */
-		.name = "Quinary MI2S_RX Hostless",
-		.stream_name = "Quinary MI2S_RX Hostless",
-		.cpu_dai_name = "QUIN_MI2S_RX_HOSTLESS",
-		.platform_name	 = "msm-pcm-hostless",
-		.dynamic = 1,
-		.dpcm_playback = 1,
-		.trigger = {SND_SOC_DPCM_TRIGGER_POST,
-			SND_SOC_DPCM_TRIGGER_POST},
-		.no_host_mode = SND_SOC_DAI_LINK_NO_HOST,
-		.ignore_suspend = 1,
-		 /* this dailink has playback support */
-		.ignore_pmdown_time = 1,
-		/* This dainlink has MI2S support */
-		.codec_dai_name = "tas2557 ASI1",
-		.codec_name = "tas2557.2-004c",
 	},
 #endif
 	/* Backend I2S DAI Links */
@@ -2745,19 +2718,14 @@ static struct snd_soc_dai_link msm8952_dai[] = {
 		.be_hw_params_fixup = msm_be_hw_params_fixup,
 		.ignore_suspend = 1,
 	},
-
+#if defined(CONFIG_SND_SOC_MAX98927)
 	{
 		.name = LPASS_BE_QUIN_MI2S_TX,
 		.stream_name = "Quinary MI2S Capture",
 		.cpu_dai_name = "msm-dai-q6-mi2s.5",
 		.platform_name = "msm-pcm-routing",
-#ifdef CONFIG_SND_SOC_MAX98927
 		.codec_dai_name = "max98927-aif1",
 		.codec_name = "max98927",
-#else
-		.codec_dai_name = "snd-soc-dummy-dai",
-		.codec_name = "snd-soc-dummy",
-#endif
 		.no_pcm = 1,
 		.dpcm_capture = 1,
 		.be_id = MSM_BACKEND_DAI_QUINARY_MI2S_TX,
@@ -2765,6 +2733,38 @@ static struct snd_soc_dai_link msm8952_dai[] = {
 		.ops = &msm8952_quin_mi2s_be_ops,
 		.ignore_suspend = 1,
 	},
+#elif defined (CONFIG_SND_SOC_TAS2557)
+    {
+		.name = LPASS_BE_QUIN_MI2S_TX,
+		.stream_name = "Quinary MI2S Capture",
+		.cpu_dai_name = "msm-dai-q6-mi2s.5",
+		.platform_name = "msm-pcm-routing",
+		.codec_dai_name = "tas2557 ASI1",
+		.codec_name = "tas2557.2-004c",
+		.no_pcm = 1,
+		.dpcm_capture = 1,
+		.be_id = MSM_BACKEND_DAI_QUINARY_MI2S_TX,
+		.be_hw_params_fixup = msm_be_hw_params_fixup,
+		.ops = &msm8952_quin_mi2s_be_ops,
+		.ignore_suspend = 1,
+	},
+
+#else
+	{
+		.name = LPASS_BE_QUIN_MI2S_TX,
+		.stream_name = "Quinary MI2S Capture",
+		.cpu_dai_name = "msm-dai-q6-mi2s.5",
+		.platform_name = "msm-pcm-routing",
+		.codec_dai_name = "snd-soc-dummy-dai",
+		.codec_name = "snd-soc-dummy",
+		.no_pcm = 1,
+		.dpcm_capture = 1,
+		.be_id = MSM_BACKEND_DAI_QUINARY_MI2S_TX,
+		.be_hw_params_fixup = msm_be_hw_params_fixup,
+		.ops = &msm8952_quin_mi2s_be_ops,
+		.ignore_suspend = 1,
+	},
+#endif
 };
 static struct snd_soc_dai_link msm8952_hdmi_dba_dai_link[] = {
 	{
@@ -2783,33 +2783,61 @@ static struct snd_soc_dai_link msm8952_hdmi_dba_dai_link[] = {
 		.ignore_suspend = 1,
 	},
 };
-
+#if defined(CONFIG_SND_SOC_MAX98927)
 static struct snd_soc_dai_link msm8952_quin_dai_link[] = {
 	{
 		.name = LPASS_BE_QUIN_MI2S_RX,
 		.stream_name = "Quinary MI2S Playback",
 		.cpu_dai_name = "msm-dai-q6-mi2s.5",
 		.platform_name = "msm-pcm-routing",
-#ifdef CONFIG_SND_SOC_MAX98927
 		.codec_dai_name = "max98927-aif1",
 		.codec_name = "max98927",
-#else
-		.codec_dai_name = "snd-soc-dummy-dai",
-		.codec_name = "snd-soc-dummy",
-#endif
 		.no_pcm = 1,
 		.dpcm_playback = 1,
 		.be_id = MSM_BACKEND_DAI_QUINARY_MI2S_RX,
-#ifdef CONFIG_SND_SOC_MAX98927
-		.be_hw_params_fixup = msm_be_hw_params_fixup,
-#else
 		.be_hw_params_fixup = msm_mi2s_rx_be_hw_params_fixup,
-#endif
 		.ops = &msm8952_quin_mi2s_be_ops,
 		.ignore_pmdown_time = 1, /* dai link has playback support */
 		.ignore_suspend = 1,
 	},
 };
+#elif defined (CONFIG_SND_SOC_TAS2557)
+static struct snd_soc_dai_link msm8952_quin_dai_link[] = {
+	{
+		.name = LPASS_BE_QUIN_MI2S_RX,
+		.stream_name = "Quinary MI2S Playback",
+		.cpu_dai_name = "msm-dai-q6-mi2s.5",
+		.platform_name = "msm-pcm-routing",
+		.codec_dai_name = "tas2557 ASI1",
+		.codec_name = "tas2557.2-004c",
+		.no_pcm = 1,
+		.dpcm_playback = 1,
+		.be_id = MSM_BACKEND_DAI_QUINARY_MI2S_RX,
+		.be_hw_params_fixup = msm_mi2s_rx_be_hw_params_fixup,
+		.ops = &msm8952_quin_mi2s_be_ops,
+		.ignore_pmdown_time = 1, /* dai link has playback support */
+		.ignore_suspend = 1,
+	},
+};
+#else
+static struct snd_soc_dai_link msm8952_quin_dai_link[] = {
+	{
+		.name = LPASS_BE_QUIN_MI2S_RX,
+		.stream_name = "Quinary MI2S Playback",
+		.cpu_dai_name = "msm-dai-q6-mi2s.5",
+		.platform_name = "msm-pcm-routing",
+		.codec_dai_name = "snd-soc-dummy-dai",
+		.codec_name = "snd-soc-dummy",
+		.no_pcm = 1,
+		.dpcm_playback = 1,
+		.be_id = MSM_BACKEND_DAI_QUINARY_MI2S_RX,
+		.be_hw_params_fixup = msm_mi2s_rx_be_hw_params_fixup,
+		.ops = &msm8952_quin_mi2s_be_ops,
+		.ignore_pmdown_time = 1, /* dai link has playback support */
+		.ignore_suspend = 1,
+	},
+};
+#endif
 
 static struct snd_soc_dai_link msm8952_split_a2dp_dai_link[] = {
 	{
